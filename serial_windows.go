@@ -82,9 +82,48 @@ func (port *windowsPort) Read(p []byte) (int, error) {
 	}
 	defer syscall.CloseHandle(ev.HEvent)
 
-	err = syscall.ReadFile(port.handle, p, &readed, ev)
-	if err == syscall.ERROR_IO_PENDING {
-		err = getOverlappedResult(port.handle, ev, &readed, true)
+	cycles := int64(0)
+	for {
+		err := syscall.ReadFile(port.handle, p, &readed, ev)
+		if err == syscall.ERROR_IO_PENDING {
+			err = getOverlappedResult(port.handle, ev, &readed, true)
+		}
+		switch err {
+		case nil:
+			// operation completed successfully
+		case syscall.ERROR_OPERATION_ABORTED:
+			// port may have been closed
+			return int(readed), &PortError{code: PortClosed, causedBy: err}
+		default:
+			// error happened
+			return int(readed), err
+		}
+
+		if readed > 0 {
+			return int(readed), nil
+		}
+		if err := resetEvent(ev.HEvent); err != nil {
+			return 0, err
+		}
+
+		if port.readTimeoutCycles != -1 {
+			cycles++
+			if cycles == port.readTimeoutCycles {
+				// Timeout happened
+				return 0, &PortError{code: Timeout}
+			}
+		}
+
+		// At the moment it seems that the only reliable way to check if
+		// a serial port is alive in Windows is to check if the SetCommState
+		// function fails.
+
+		params := &dcb{}
+		getCommState(port.handle, params)
+		if err := setCommState(port.handle, params); err != nil {
+			port.Close()
+			return 0, err
+		}
 	}
 	switch err {
 	case nil:
